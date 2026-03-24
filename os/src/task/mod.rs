@@ -22,6 +22,7 @@ use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
+use crate::syscall::NUM_SYSCALLS;
 
 /// The task manager, where all the tasks are managed.
 ///
@@ -54,6 +55,7 @@ lazy_static! {
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            task_syscall_counter:[0;NUM_SYSCALLS]
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
@@ -135,6 +137,32 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    /// Inc certain syscall count in cur task
+    fn syscall_count_inc(&self,syscall:usize,task:usize){
+        let mut inner = self.inner.exclusive_access();
+        inner.tasks[task].task_syscall_counter[syscall]+=1;
+    }
+
+    /// Get certain syscall count in cur task
+    fn syscall_count_get(&self,syscall:usize,task:usize)->u8{
+        let inner = self.inner.exclusive_access();
+        inner.tasks[task].task_syscall_counter[syscall]
+    }
+
+    fn cur_syscall_count_inc(&self,syscall:usize){
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        drop(inner);
+        self.syscall_count_inc(syscall,current);
+    }
+
+    fn cur_syscall_count_get(&self,syscall:usize)->u8{
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        drop(inner);
+        self.syscall_count_get(syscall,current)
+    }
 }
 
 /// Run the first task in task list.
@@ -168,4 +196,14 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// Inc certain syscall count in cur task
+pub fn cur_syscall_count_inc(syscall:usize){
+    TASK_MANAGER.cur_syscall_count_inc(syscall);
+}
+
+/// Get certain syscall count in cur task
+pub fn cur_syscall_count_get(syscall:usize)->u8{
+    TASK_MANAGER.cur_syscall_count_get(syscall)
 }

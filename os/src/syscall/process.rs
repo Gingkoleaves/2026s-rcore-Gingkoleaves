@@ -1,7 +1,6 @@
 //! Process management syscalls
 use crate::{
-    task::{exit_current_and_run_next, suspend_current_and_run_next},
-    timer::get_time_us,
+    task::{exit_current_and_run_next, suspend_current_and_run_next, cur_syscall_count_get}, timer::get_time_us, syscall::NUM_SYSCALLS
 };
 
 #[repr(C)]
@@ -38,8 +37,32 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     0
 }
 
+// return SYSCALL idx in COUNTER_SYSCALL
+pub fn syscall_check(syscall_num:usize)->usize{
+    match syscall_num{
+        0..=NUM_SYSCALLS=>syscall_num,
+        _=>panic!("Too big id for syscall!")
+    }
+}
+
 // TODO: implement the syscall
 pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
     trace!("kernel: sys_trace");
-    -1
+    match _trace_request{
+        0=>{
+            let ptr = _id as *const u8;
+            let value:u8=unsafe{core::ptr::read_volatile(ptr)};
+            value as isize
+        },
+        1=>{
+            let ptr = _id as *mut u8;
+            unsafe{ core::ptr::write_volatile(ptr, _data as u8);}
+            0
+        },
+        2=>{
+            let checked_syscall= syscall_check(_id);
+            cur_syscall_count_get(checked_syscall) as isize 
+        },
+        _=> -1
+    }
 }

@@ -20,6 +20,8 @@ const SYSCALL_YIELD: usize = 124;
 const SYSCALL_GET_TIME: usize = 169;
 /// trace syscall
 const SYSCALL_TRACE: usize = 410;
+/// syscall num
+pub const NUM_SYSCALLS:usize = 500;
 
 mod fs;
 mod process;
@@ -27,8 +29,11 @@ mod process;
 use fs::*;
 use process::*;
 
+use crate::task::cur_syscall_count_inc;
+
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
+    cur_syscall_count_inc(syscall_check(syscall_id));
     match syscall_id {
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
