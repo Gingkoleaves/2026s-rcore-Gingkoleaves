@@ -23,6 +23,8 @@ use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
+pub use crate::config::MAX_SYSCALL_NUM;
+pub use crate::mm::{VirtAddr,MapPermission};
 
 /// The task manager, where all the tasks are managed.
 ///
@@ -153,6 +155,18 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    /// Inc certain syscall count in cur task
+    fn syscall_count_inc(&self,syscall:usize,task:usize){
+        let mut inner = self.inner.exclusive_access();
+        inner.tasks[task].task_syscall_counter[syscall]+=1;
+    }
+
+    /// Get certain syscall count in cur task
+    fn syscall_count_get(&self,syscall:usize,task:usize)->u8{
+        let inner = self.inner.exclusive_access();
+        inner.tasks[task].task_syscall_counter[syscall]
+    }
 }
 
 /// Run the first task in task list.
@@ -201,4 +215,41 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Inc certain syscall count in cur task
+pub fn cur_syscall_count_inc(syscall:usize){
+    let inner: core::cell::RefMut<'_, TaskManagerInner> = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    drop(inner);
+    TASK_MANAGER.syscall_count_inc(syscall,current);
+}
+
+/// Get certain syscall count in cur task
+pub fn cur_syscall_count_get(syscall:usize)->u8{
+    let inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    drop(inner);
+    TASK_MANAGER.syscall_count_get(syscall,current)
+}
+
+/// Mmap in current user-space
+pub fn current_mmap(start_va: VirtAddr, end_va: VirtAddr, perm: MapPermission)-> isize {                                                                   
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let cur = inner.current_task;                                             
+    inner.tasks[cur].memory_set.mmap(start_va, end_va, perm)
+}    
+
+/// Unmmap in current user-space
+pub fn current_munmap(start_va: VirtAddr, end_va: VirtAddr) -> isize {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();                    
+    let cur = inner.current_task;
+    inner.tasks[cur].memory_set.unmmap(start_va, end_va)                      
+}
+
+/// export pagefault-handler
+pub fn handle_cur_page_fault(va:VirtAddr)-> bool{
+    let mut inner =TASK_MANAGER.inner.exclusive_access();
+    let cur = inner.current_task;
+    inner.tasks[cur].memory_set.handle_page_fault(va)
 }

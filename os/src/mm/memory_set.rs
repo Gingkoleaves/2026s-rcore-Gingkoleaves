@@ -63,8 +63,22 @@ impl MemorySet {
             None,
         );
     }
+    /// insert_lazy_frame
+    pub fn insert_lazy_framed_area(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+    ) {
+        self.push(
+            MapArea::new(start_va, end_va, MapType::LazyFramed, permission),
+            None,
+        );
+    }
     fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
-        map_area.map(&mut self.page_table);
+        if map_area.map_type!=MapType::LazyFramed{
+            map_area.map(&mut self.page_table);
+        }
         if let Some(data) = data {
             map_area.copy_data(&mut self.page_table, data);
         }
@@ -262,7 +276,123 @@ impl MemorySet {
             false
         }
     }
+
+    /// Memory map to user-space
+    #[allow(unused)]
+    pub fn mmap(&mut self, start_va:VirtAddr, end_va: VirtAddr, permission: MapPermission)->isize{
+        let start_vpn=start_va.floor();
+        let end_vpn=end_va.ceil();
+
+        if let Some(area)=self.areas.iter().find(|area| {
+            let res = area.vpn_range.is_overlap(start_vpn, end_vpn);
+            !res.is_none()&&res.unwrap()
+        }){
+            -1
+        }else{
+            self.insert_lazy_framed_area(start_va, end_va, permission);
+            0
+        }  
+    }
+
+    /// unmap pages, do not contains end_va located pages
+    #[allow(unused)]
+    pub fn unmmap(&mut self, start_va:VirtAddr, end_va: VirtAddr)->isize{
+        let start_vpn=start_va.floor();
+        let end_vpn=end_va.ceil();
+
+        let mut idx=0;
+        
+        while idx<self.areas.len(){
+            let overlap=self.areas[idx].vpn_range.is_overlap(start_vpn, end_vpn);
+            if overlap.is_none() || !overlap.unwrap(){
+                idx+=1;
+                continue;
+            }
+
+            // own this item, shift others forward
+            let mut area=self.areas.remove(idx);
+            let area_start=area.vpn_range.get_start();
+            let area_end=area.vpn_range.get_end();
+
+            let process_start=start_vpn.max(area_start);
+            let process_end=end_vpn.min(area_end);
+
+            if area_start==process_start && area_end==process_end{
+                area.unmap(&mut self.page_table);
+                drop(area);
+                continue;
+            }
+
+            if area_end==process_end{
+                let new_end:usize=usize::from(process_start)-1;
+                area.shrink_to(&mut self.page_table, process_start);
+                self.areas.insert(idx,area);
+                idx+=1;
+                continue;
+            }
+
+            if area_start==process_start{
+                let new_start:usize=usize::from(process_end)+1;
+                area.shrink_up(&mut self.page_table,process_end);
+                self.areas.insert(idx,area);
+                idx+=1;
+                continue;
+            }
+
+            // maybe in the middle
+            let map_type=area.map_type;
+            let map_perm=area.map_perm;
+
+            let mut right_area = MapArea::new(
+                process_end.into(), 
+                area_end.into(), 
+                map_type,
+                map_perm
+            );
+
+            for vpn in right_area.vpn_range{
+                if let Some(frame) = area.data_frames.remove(&vpn){
+                    right_area.data_frames.insert(vpn, frame);
+                }
+            }
+
+            for vpn in VPNRange::new(process_start,process_end){
+                area.unmap_one(&mut self.page_table, vpn);
+            }
+
+            area.vpn_range = VPNRange::new(area.vpn_range.get_start(), process_start);
+
+            self.areas.insert(idx,area);
+            self.areas.insert(idx,right_area);
+            idx+=2
+        }
+        
+        0
+    }
+    
+    /// Handle pagefault for lazy allocation, va where fault happens, returns true means allocate lazily can process,otherwise should panic
+    pub fn handle_page_fault(&mut self,va:VirtAddr)->bool{
+        let vpn=va.floor();
+        // 如果已经映射就不处理
+        if let Some(pte) = self.page_table.translate(vpn) {                                    
+            if pte.is_valid() {                                                                
+                return false;                                                                  
+            }                                                                                  
+        }         
+                              
+        if let Some(area) = self.areas.iter_mut().find(|a: &&mut MapArea| {                                   
+            a.map_type == MapType::LazyFramed               
+            && a.vpn_range.get_start() <= vpn                                                  
+            && vpn < a.vpn_range.get_end()                                                     
+        }) {                              
+            area.compensate_map_one(&mut self.page_table, vpn);  // 现在才分配物理页                      
+            true                                                         
+        } else {                                                                               
+            false
+        } 
+    }
 }
+
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
     vpn_range: VPNRange,
@@ -272,6 +402,7 @@ pub struct MapArea {
 }
 
 impl MapArea {
+    /// Establish new MapArea
     pub fn new(
         start_va: VirtAddr,
         end_va: VirtAddr,
@@ -287,6 +418,7 @@ impl MapArea {
             map_perm,
         }
     }
+    /// Map one virtual page into pagetable
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         let ppn: PhysPageNum;
         match self.map_type {
@@ -294,32 +426,63 @@ impl MapArea {
                 ppn = PhysPageNum(vpn.0);
             }
             MapType::Framed => {
-                let frame = frame_alloc().unwrap();
+                let frame: FrameTracker = frame_alloc().unwrap();
                 ppn = frame.ppn;
                 self.data_frames.insert(vpn, frame);
+            }
+            MapType::LazyFramed =>{
+                ppn=PhysPageNum(0)
             }
         }
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
         page_table.map(vpn, ppn, pte_flags);
     }
+    /// Map one virtual page into pagetable
+    pub fn compensate_map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) ->isize{
+        let ppn: PhysPageNum;
+        match self.map_type {
+            MapType::LazyFramed =>{
+                let frame: FrameTracker = frame_alloc().unwrap();
+                ppn = frame.ppn;
+                self.data_frames.insert(vpn, frame);
+                let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+                page_table.map(vpn, ppn, pte_flags);
+                0
+            }
+            _=>{-1}
+        }
+    }
+    /// Unmap one virtual page into pagetable
     #[allow(unused)]
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
-        if self.map_type == MapType::Framed {
+        let pte=page_table.translate(vpn);
+        if self.map_type==MapType::LazyFramed{
+            if pte.is_some(){
+                self.data_frames.remove(&vpn);
+                page_table.unmap(vpn);
+            }
+        }else if self.map_type == MapType::Framed {
             self.data_frames.remove(&vpn);
+            page_table.unmap(vpn);
+        }else{
+            page_table.unmap(vpn);
         }
-        page_table.unmap(vpn);
+        
     }
+    /// Map virtual page into pagetable
     pub fn map(&mut self, page_table: &mut PageTable) {
         for vpn in self.vpn_range {
             self.map_one(page_table, vpn);
         }
     }
+    /// Unmap virtual page into pagetable
     #[allow(unused)]
     pub fn unmap(&mut self, page_table: &mut PageTable) {
         for vpn in self.vpn_range {
             self.unmap_one(page_table, vpn);
         }
     }
+    /// Shrink down
     #[allow(unused)]
     pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         for vpn in VPNRange::new(new_end, self.vpn_range.get_end()) {
@@ -327,6 +490,15 @@ impl MapArea {
         }
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
     }
+    /// Shrink up
+    #[allow(unused)]
+    pub fn shrink_up(&mut self, page_table: &mut PageTable, new_start: VirtPageNum) {
+        for vpn in VPNRange::new(self.vpn_range.get_start(),new_start) {
+            self.unmap_one(page_table, vpn)
+        }
+        self.vpn_range = VPNRange::new(new_start,self.vpn_range.get_end());
+    }
+    /// Append next
     #[allow(unused)]
     pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         for vpn in VPNRange::new(self.vpn_range.get_end(), new_end) {
@@ -361,8 +533,12 @@ impl MapArea {
 #[derive(Copy, Clone, PartialEq, Debug)]
 /// map type for memory set: identical or framed
 pub enum MapType {
+    /// Identical project
     Identical,
+    /// Framed project
     Framed,
+    /// Lazy allocate
+    LazyFramed,
 }
 
 bitflags! {
