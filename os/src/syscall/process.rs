@@ -3,11 +3,14 @@ use alloc::sync::Arc;
 
 use crate::{
     loader::get_app_data_by_name,
-    mm::{translated_refmut, translated_str},
+    mm::{translated_refmut, translated_str, copy_to_user, MapPermission, VirtAddr },
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next,
+        suspend_current_and_run_next, current_mmap, current_munmap, handle_cur_page_fault,
+        cur_syscall_count_get, current_task_set_prio, MIN_PRIORITY
     },
+    config::{MAX_SYSCALL_NUM,CLOCK_FREQ,PAGE_SIZE},
+    timer::{get_time}
 };
 
 #[repr(C)]
@@ -15,6 +18,14 @@ use crate::{
 pub struct TimeVal {
     pub sec: usize,
     pub usec: usize,
+}
+
+// return SYSCALL idx in COUNTER_SYSCALL
+pub fn check_syscall(syscall_num:usize)->usize{
+    match syscall_num{
+        0..=MAX_SYSCALL_NUM=>syscall_num,
+        _=>panic!("Too big id for syscall!")
+    }
 }
 
 /// task exits and submit an exit code
@@ -106,20 +117,43 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    trace!("kernel: sys_get_time");
+    let time =TimeVal{
+                sec:get_time()/CLOCK_FREQ,
+                usec:(get_time() % CLOCK_FREQ) * 1000000 / CLOCK_FREQ
+            };
+
+    let src=unsafe{
+        core::slice::from_raw_parts(
+            &time as *const _ as *const u8,
+            core::mem::size_of::<TimeVal>()
+        ) 
+    };
+
+    copy_to_user(current_user_token(), src, _ts as usize)
 }
 
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
+pub fn sys_mmap(_start: usize, _len: usize, _prot: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    // not aligned
+    if _start & (PAGE_SIZE-1)!=0{
+        return -1;
+    }
+    // illegal prot or meaningless prot
+    if _prot&!0x7 !=0 || _prot&0x7 ==0{
+        return -1
+    } 
+
+    let start_va = VirtAddr::from(_start);
+    let end_va =VirtAddr::from(_start+_len);
+    let mut map_prem=MapPermission::from_bits_truncate((_prot<< 1)as u8);
+    map_prem |=MapPermission::U;
+    
+    current_mmap(start_va, end_va, map_prem)
 }
 
 /// YOUR JOB: Implement munmap.
@@ -128,7 +162,20 @@ pub fn sys_munmap(_start: usize, _len: usize) -> isize {
         "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    // not aligned
+    if _start & (PAGE_SIZE-1)!=0{
+        return -1;
+    }
+
+    // not aligned
+    if _len & (PAGE_SIZE - 1) != 0 {
+        return -1;
+    }
+
+    let start_va = VirtAddr::from(_start);
+    let end_va = VirtAddr::from(_start+_len);
+
+    current_munmap(start_va, end_va)
 }
 
 /// change data segment size
@@ -148,7 +195,18 @@ pub fn sys_spawn(_path: *const u8) -> isize {
         "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let token = current_user_token();
+    let path = translated_str(token, _path);
+    if let Some(data) = get_app_data_by_name(path.as_str()) {
+        let task = current_task().unwrap();
+        let new_task=task.spawn(data);// 获取子进程的 PID，作为系统调用的返回值
+        let new_pid = new_task.pid.0;
+        // add new task to scheduler
+        add_task(new_task);
+        new_pid as isize
+    } else {
+        -1
+    }
 }
 
 // YOUR JOB: Set task priority.
@@ -157,5 +215,35 @@ pub fn sys_set_priority(_prio: isize) -> isize {
         "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    if _prio<MIN_PRIORITY as isize{
+        return -1 
+    }
+
+    current_task_set_prio(_prio as usize);
+    _prio
+}
+
+#[allow(unused)]
+pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
+    trace!("kernel: sys_trace");
+    let token=current_user_token();
+    match _trace_request{
+        0=>{
+            // 如果vaild=1或vaild=0但是不是lazy-allocate，则不处理
+            handle_cur_page_fault(_id.into());
+            // translated_refmut遇到非法va直接unwrap->panic
+            *(translated_refmut(token,_id as *mut u8)) as isize
+        },
+        1=>{
+            let src: [u8; 1] = (_data as u8).to_le_bytes();
+            // 如果vaild=1或vaild=0但是不是lazy-allocate，则不处理
+            handle_cur_page_fault(_id.into());
+            copy_to_user(token, &src, _id)
+        },
+        2=>{
+            let checked_syscall= check_syscall(_id);
+            cur_syscall_count_get(checked_syscall) as isize 
+        },
+        _=> -1
+    }
 }

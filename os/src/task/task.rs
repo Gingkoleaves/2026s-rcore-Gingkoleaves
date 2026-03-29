@@ -1,13 +1,14 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{BIG_STRIDE, MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use core::cmp::Ordering;
 
 /// Task control block structure
 ///
@@ -33,6 +34,53 @@ impl TaskControlBlock {
     pub fn get_user_token(&self) -> usize {
         let inner = self.inner_exclusive_access();
         inner.memory_set.token()
+    }
+}
+
+type PriorityType = u8;
+type StrideType = u16;
+/// Max priority
+pub const MIN_PRIORITY: PriorityType=2;
+/// Min priority
+pub const MAX_PRIORITY: PriorityType=16;
+
+#[derive(Clone, Copy)]
+/// TaskPriority
+pub struct TaskPriority {
+    priority: PriorityType,
+    current_stride: StrideType,
+}
+
+impl TaskPriority {
+    /// StrideType max
+    pub const MAX: StrideType = StrideType::MAX;
+
+    /// New
+    pub fn new(prio:PriorityType)->Self{
+        Self { priority: prio, current_stride: 0 }
+    }
+
+    /// Increse cur stride by a pass
+    pub fn inc_stride(&mut self) {
+        // 使用 wrapping_add 显式处理溢出（即使 StrideType 改变也安全）
+        let pass = (BIG_STRIDE as PriorityType / self.priority) as StrideType;
+        self.current_stride = self.current_stride.wrapping_add(pass);
+    }
+
+    /// Get current stride
+    pub fn get_stride(&self) -> StrideType {
+        self.current_stride
+    }
+
+    /// Set priority
+    pub fn set_priority(&mut self,prio:PriorityType){
+        self.priority=prio;
+    }
+
+    /// Compare stride
+    pub fn cmp(a:StrideType,b:StrideType)-> core::cmp::Ordering {
+        let diff = a.wrapping_sub(b);
+        if diff < (StrideType::MAX / 2) { Ordering::Greater } else { Ordering::Less }
     }
 }
 
@@ -68,6 +116,12 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Syscall count
+    pub task_syscall_counter:[u8;MAX_SYSCALL_NUM],
+
+    /// Priority of current task
+    pub priorty: TaskPriority,
 }
 
 impl TaskControlBlockInner {
@@ -84,6 +138,22 @@ impl TaskControlBlockInner {
     }
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
+    }
+    pub fn syscall_count_inc(&mut self,syscall:usize){
+        self.task_syscall_counter[syscall]+=1;
+    }
+    pub fn syscall_count_get(&self,syscall:usize)->u8{
+        self.task_syscall_counter[syscall]
+    }
+    pub fn get_stride(&self)->StrideType{
+        self.priorty.get_stride()
+    }
+    pub fn inc_stride(&mut self){
+        self.priorty.inc_stride();
+    }
+    pub fn set_priority(&mut self, prio:usize){
+        let safe_prio= if prio>PriorityType::MAX as usize{PriorityType::MAX}else{prio as PriorityType};
+        self.priorty.set_priority(safe_prio);
     }
 }
 
@@ -118,6 +188,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    task_syscall_counter:[0;MAX_SYSCALL_NUM],
+                    priorty:TaskPriority::new(MIN_PRIORITY)
                 })
             },
         };
@@ -191,6 +263,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    task_syscall_counter:[0;MAX_SYSCALL_NUM],
+                    priorty:TaskPriority::new(MAX_PRIORITY)
                 })
             },
         });
@@ -205,6 +279,19 @@ impl TaskControlBlock {
         // **** release child PCB
         // ---- release parent PCB
     }
+
+    /// spawn a new process from elf
+    pub fn spawn(self:&Arc<Self>,elf_data: &[u8])-> Arc<Self> {
+        let mut parent_inner = self.inner_exclusive_access();
+        let child = Arc::new(Self::new(elf_data));
+
+        child.inner_exclusive_access().priorty=TaskPriority::new(MAX_PRIORITY);
+
+        parent_inner.children.push(child.clone());
+        child.inner_exclusive_access().parent=Some(Arc::downgrade(self));
+        child
+    }
+    
 
     /// get pid of process
     pub fn getpid(&self) -> usize {
