@@ -11,6 +11,7 @@ use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::sync::Arc;
 use lazy_static::*;
+use crate::mm::{VirtAddr,MapPermission};
 
 /// Processor management structure
 pub struct Processor {
@@ -86,18 +87,46 @@ pub fn current_task() -> Option<Arc<TaskControlBlock>> {
     PROCESSOR.exclusive_access().current()
 }
 
+/// Get current task's trap context
+pub fn current_trap_cx()-> &'static mut TrapContext{
+    current_task().unwrap().inner_exclusive_access().get_trap_cx()
+}
+
 /// Get the current user token(addr of page table)
 pub fn current_user_token() -> usize {
     let task = current_task().unwrap();
     task.get_user_token()
 }
 
-///Get the mutable reference to trap context of current task
-pub fn current_trap_cx() -> &'static mut TrapContext {
-    current_task()
-        .unwrap()
-        .inner_exclusive_access()
-        .get_trap_cx()
+/// Set current task prio
+pub fn current_task_set_prio(prio:usize)
+{
+    current_task().unwrap().inner_exclusive_access().set_priority(prio);
+}
+
+/// Mmap in current user-space
+pub fn current_mmap(start_va: VirtAddr, end_va: VirtAddr, perm: MapPermission)-> isize {                                                                   
+    current_task().unwrap().inner_exclusive_access().memory_set.mmap(start_va, end_va, perm)
+}    
+
+/// Unmmap in current user-space
+pub fn current_munmap(start_va: VirtAddr, end_va: VirtAddr) -> isize {
+    current_task().unwrap().inner_exclusive_access().memory_set.unmmap(start_va, end_va)          
+}
+
+/// export pagefault-handler
+pub fn handle_cur_page_fault(va:VirtAddr)-> bool{
+    current_task().unwrap().inner_exclusive_access().memory_set.handle_page_fault(va)
+}
+
+/// Inc certain syscall count in cur task
+pub fn cur_syscall_count_inc(syscall:usize){
+    current_task().unwrap().inner_exclusive_access().syscall_count_inc(syscall);
+}
+
+/// Get certain syscall count in cur task
+pub fn cur_syscall_count_get(syscall:usize)->u8{
+    current_task().unwrap().inner_exclusive_access().syscall_count_get(syscall)
 }
 
 ///Return to idle control flow for new scheduling

@@ -244,6 +244,14 @@ where
     pub fn get_end(&self) -> T {
         self.r
     }
+    pub fn is_overlap(&self,l:T,r:T)->Option<bool>{
+        if l >= r { return None; }                                                
+        if l < self.r && self.l < r {                                             
+            Some(true)
+        } else {                                                                  
+            Some(false)
+        }
+    }
 }
 impl<T> IntoIterator for SimpleRange<T>
 where

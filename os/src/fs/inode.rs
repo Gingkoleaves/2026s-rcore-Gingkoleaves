@@ -5,7 +5,7 @@
 //! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
 //! need to wrap `OSInodeInner` into `UPSafeCell`
 use super::File;
-use crate::drivers::BLOCK_DEVICE;
+use crate::{drivers::BLOCK_DEVICE, fs::StatMode};
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
 use alloc::sync::Arc;
@@ -13,6 +13,7 @@ use alloc::vec::Vec;
 use bitflags::*;
 use easy_fs::{EasyFileSystem, Inode};
 use lazy_static::*;
+use crate::fs::Stat;
 
 /// inode in memory
 /// A wrapper around a filesystem inode
@@ -52,6 +53,14 @@ impl OSInode {
             v.extend_from_slice(&buffer[..len]);
         }
         v
+    }
+    /// link current OSInode to name
+    pub fn linkat(&self,name:&str)->bool{
+        self.inner.exclusive_access().inode.linkat(name)
+    }
+    /// unlink name from rootinode
+    pub fn unlinkat(&self,name:&str)->bool{
+        self.inner.exclusive_access().inode.unlinkat(name)
     }
 }
 
@@ -155,5 +164,19 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
+    }
+    fn stat(&self, st:&mut Stat) {
+        let(dev,ino,is_dir,nlink)=self.inner.exclusive_access().inode.stat();
+        st.dev=dev;
+        st.ino=ino;
+        st.mode= match is_dir {
+            Some(true) => StatMode::DIR,
+            Some(false) => StatMode::FILE,
+            None => StatMode::NULL,
+        };
+        st.nlink=match nlink{
+            Some(val)=>val,
+            None=>0,
+        }
     }
 }

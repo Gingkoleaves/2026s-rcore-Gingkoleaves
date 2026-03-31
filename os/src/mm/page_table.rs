@@ -1,5 +1,6 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 use super::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use crate::config::PAGE_SIZE;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -61,6 +62,10 @@ impl PageTableEntry {
     /// The page pointered by page table entry is executable?
     pub fn executable(&self) -> bool {
         (self.flags() & PTEFlags::X) != PTEFlags::empty()
+    }
+    /// The page pointered by page table entry is user-alowed?
+    pub fn is_user_allowed(&self) -> bool {
+        (self.flags() & PTEFlags::U) != PTEFlags::empty()
     }
 }
 
@@ -158,6 +163,33 @@ impl PageTable {
     }
 }
 
+/// copy src to user-space address dst_va
+pub fn copy_to_user(token: usize, src: &[u8], dst_va: usize) -> isize {    let page_table = PageTable::from_token(token);
+    let start: usize = dst_va;
+    let len=src.len();
+    let mut processed:usize=0;
+    
+    while processed < len {
+        let start_va = VirtAddr::from(start+processed);
+        let vpn = start_va.floor();        
+        let pte=page_table.translate(vpn);
+
+        // vaild and writeable
+        if pte.is_none() || !pte.unwrap().is_valid() || !pte.unwrap().writable(){
+            return -1 as isize;
+        }
+
+        let ppn=pte.unwrap().ppn();
+        let page_offset = start_va.page_offset();
+        let write_len = (PAGE_SIZE - page_offset).min(len-processed);
+
+        let dst_slice=&mut ppn.get_bytes_array()[page_offset..page_offset+write_len];
+        dst_slice.copy_from_slice(&src[processed..processed+write_len]);        
+        processed+=write_len;
+    }
+    0
+}
+
 /// Translate&Copy a ptr[u8] array with LENGTH len to a mutable u8 Vec through page table
 pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
     let page_table = PageTable::from_token(token);
@@ -168,6 +200,7 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
         let start_va = VirtAddr::from(start);
         let mut vpn = start_va.floor();
         let ppn = page_table.translate(vpn).unwrap().ppn();
+        // 可能越界！应当通过检查user权限避免对页顶部进行访问
         vpn.step();
         let mut end_va: VirtAddr = vpn.into();
         end_va = end_va.min(VirtAddr::from(end));
