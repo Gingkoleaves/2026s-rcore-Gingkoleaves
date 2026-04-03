@@ -1,5 +1,6 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 use super::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use crate::config::PAGE_SIZE;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -215,6 +216,33 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
         .translate_va(VirtAddr::from(va))
         .unwrap()
         .get_mut()
+}
+/// copy src to user-space address dst_va
+pub fn copy_to_user(token: usize, src: &[u8], dst_va: usize) -> isize {
+    let page_table = PageTable::from_token(token);
+    let start: usize = dst_va;
+    let len = src.len();
+    let mut processed: usize = 0;
+
+    while processed < len {
+        let start_va = VirtAddr::from(start + processed);
+        let vpn = start_va.floor();
+        let pte = page_table.translate(vpn);
+
+        // vaild and writeable
+        if pte.is_none() || !pte.unwrap().is_valid() || !pte.unwrap().writable() {
+            return -1 as isize;
+        }
+
+        let ppn = pte.unwrap().ppn();
+        let page_offset = start_va.page_offset();
+        let write_len = (PAGE_SIZE - page_offset).min(len - processed);
+
+        let dst_slice = &mut ppn.get_bytes_array()[page_offset..page_offset + write_len];
+        dst_slice.copy_from_slice(&src[processed..processed + write_len]);
+        processed += write_len;
+    }
+    0
 }
 
 /// An abstraction over a buffer passed from user space to kernel space

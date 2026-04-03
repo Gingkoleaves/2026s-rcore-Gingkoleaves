@@ -1,10 +1,12 @@
 use crate::{
+    config::CLOCK_FREQ,
     fs::{open_file, OpenFlags},
-    mm::{translated_ref, translated_refmut, translated_str},
+    mm::{copy_to_user, translated_ref, translated_refmut, translated_str},
     task::{
         current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
         suspend_current_and_run_next, SignalFlags,
     },
+    timer::get_time,
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
 
@@ -156,7 +158,20 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
         "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    trace!("kernel: sys_get_time");
+    let time = TimeVal {
+        sec: get_time() / CLOCK_FREQ,
+        usec: (get_time() % CLOCK_FREQ) * 1000000 / CLOCK_FREQ,
+    };
+
+    let src = unsafe {
+        core::slice::from_raw_parts(
+            &time as *const _ as *const u8,
+            core::mem::size_of::<TimeVal>(),
+        )
+    };
+
+    copy_to_user(current_user_token(), src, _ts as usize)
 }
 
 /// mmap syscall
