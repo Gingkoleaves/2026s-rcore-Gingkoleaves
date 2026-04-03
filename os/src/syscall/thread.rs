@@ -3,7 +3,7 @@ use crate::{
     task::{add_task, current_task, TaskControlBlock},
     trap::{trap_handler, TrapContext},
 };
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 /// thread create syscall
 pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
     trace!(
@@ -41,6 +41,45 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
         tasks.push(None);
     }
     tasks[new_task_tid] = Some(Arc::clone(&new_task));
+
+    let mutex_res_count = process_inner.mutex_deadlock_detection.available.len();
+    let mutex_deadlock = &mut process_inner.mutex_deadlock_detection;
+    while mutex_deadlock.need.len() < new_task_tid + 1 {
+        mutex_deadlock.need.push(Vec::new());
+        mutex_deadlock.need.last_mut().unwrap().resize(mutex_res_count, 0);
+        mutex_deadlock.allocation.push(Vec::new());
+        mutex_deadlock.allocation.last_mut().unwrap().resize(mutex_res_count, 0);
+    }
+    for row in mutex_deadlock.need.iter_mut() {
+        if row.len() < mutex_res_count {
+            row.resize(mutex_res_count, 0);
+        }
+    }
+    for row in mutex_deadlock.allocation.iter_mut() {
+        if row.len() < mutex_res_count {
+            row.resize(mutex_res_count, 0);
+        }
+    }
+
+    let semaphore_res_count = process_inner.semaphore_deadlock_detection.available.len();
+    let semaphore_deadlock = &mut process_inner.semaphore_deadlock_detection;
+    while semaphore_deadlock.need.len() < new_task_tid + 1 {
+        semaphore_deadlock.need.push(Vec::new());
+        semaphore_deadlock.need.last_mut().unwrap().resize(semaphore_res_count, 0);
+        semaphore_deadlock.allocation.push(Vec::new());
+        semaphore_deadlock.allocation.last_mut().unwrap().resize(semaphore_res_count, 0);
+    }
+    for row in semaphore_deadlock.need.iter_mut() {
+        if row.len() < semaphore_res_count {
+            row.resize(semaphore_res_count, 0);
+        }
+    }
+    for row in semaphore_deadlock.allocation.iter_mut() {
+        if row.len() < semaphore_res_count {
+            row.resize(semaphore_res_count, 0);
+        }
+    }
+
     let new_task_trap_cx = new_task_inner.get_trap_cx();
     *new_task_trap_cx = TrapContext::app_init_context(
         entry,

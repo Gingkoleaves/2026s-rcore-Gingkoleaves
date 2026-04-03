@@ -88,6 +88,24 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // it will be deallocated when sys_waittid is called
     drop(task_inner);
 
+    // remove resource demands
+    let mut process_inner = process.inner_exclusive_access();
+    for mutex_id in 0..process_inner.mutex_list.len() {
+        if process_inner.mutex_deadlock_detection.allocation[tid][mutex_id] == 1 {
+            process_inner.mutex_deadlock_detection.allocation[tid][mutex_id] = 0;
+            process_inner.mutex_deadlock_detection.available[mutex_id] = 1;
+            process_inner.mutex_deadlock_detection.need[tid][mutex_id] = 0;
+        }
+    }
+    for sem_id in 0..process_inner.semaphore_list.len() {
+        if process_inner.semaphore_deadlock_detection.allocation[tid][sem_id] == 1 {
+            process_inner.semaphore_deadlock_detection.allocation[tid][sem_id] = 0;
+            process_inner.semaphore_deadlock_detection.available[sem_id] += 1;
+            process_inner.semaphore_deadlock_detection.need[tid][sem_id] = 0;
+        }
+    }
+    drop(process_inner);
+
     // Move the task to stop-wait status, to avoid kernel stack from being freed
     if tid == 0 {
         add_stopping_task(task);

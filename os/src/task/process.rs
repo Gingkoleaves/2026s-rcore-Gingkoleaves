@@ -49,6 +49,9 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// for deadlock detection
+    pub mutex_deadlock_detection: DeadlockDetectionInfo,
+    pub semaphore_deadlock_detection: DeadlockDetectionInfo,
 }
 
 impl ProcessControlBlockInner {
@@ -119,6 +122,18 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    mutex_deadlock_detection: DeadlockDetectionInfo {
+                        vaild: false,
+                        available: Vec::new(),
+                        allocation: Vec::new(),
+                        need: Vec::new(),
+                    },
+                    semaphore_deadlock_detection: DeadlockDetectionInfo {
+                        vaild: false,
+                        available: Vec::new(),
+                        allocation: Vec::new(),
+                        need: Vec::new(),
+                    },
                 })
             },
         });
@@ -144,6 +159,20 @@ impl ProcessControlBlock {
         // add main thread to the process
         let mut process_inner = process.inner_exclusive_access();
         process_inner.tasks.push(Some(Arc::clone(&task)));
+        // add main thread to deadlock detection info
+        process_inner.mutex_deadlock_detection.need.push(Vec::new());
+        process_inner
+            .mutex_deadlock_detection
+            .allocation
+            .push(Vec::new());
+        process_inner
+            .semaphore_deadlock_detection
+            .need
+            .push(Vec::new());
+        process_inner
+            .semaphore_deadlock_detection
+            .allocation
+            .push(Vec::new());
         drop(process_inner);
         insert_into_pid2process(process.getpid(), Arc::clone(&process));
         // add main thread to scheduler
@@ -228,6 +257,20 @@ impl ProcessControlBlock {
                 new_fd_table.push(None);
             }
         }
+        let parent_mutex_deadlock_info = &parent.mutex_deadlock_detection;
+        let new_mutex_deadlock_info = DeadlockDetectionInfo {
+            vaild: parent_mutex_deadlock_info.vaild,
+            available: parent_mutex_deadlock_info.available.clone(),
+            allocation: parent_mutex_deadlock_info.allocation.clone(),
+            need: parent_mutex_deadlock_info.need.clone(),
+        };
+        let parent_semaphore_deadlock_info = &parent.semaphore_deadlock_detection;
+        let new_semaphore_deadlock_info = DeadlockDetectionInfo {
+            vaild: parent_semaphore_deadlock_info.vaild,
+            available: parent_semaphore_deadlock_info.available.clone(),
+            allocation: parent_semaphore_deadlock_info.allocation.clone(),
+            need: parent_semaphore_deadlock_info.need.clone(),
+        };
         // create child process pcb
         let child = Arc::new(Self {
             pid,
@@ -245,6 +288,8 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    mutex_deadlock_detection: new_mutex_deadlock_info,
+                    semaphore_deadlock_detection: new_semaphore_deadlock_info,
                 })
             },
         });
@@ -281,5 +326,60 @@ impl ProcessControlBlock {
     /// get pid
     pub fn getpid(&self) -> usize {
         self.pid.0
+    }
+}
+
+pub struct DeadlockDetectionInfo {
+    pub vaild: bool,
+    pub available: Vec<usize>,
+    pub allocation: Vec<Vec<usize>>,
+    pub need: Vec<Vec<usize>>,
+}
+
+impl DeadlockDetectionInfo {
+    pub fn is_safe_resource(&self) -> bool {
+        let thread_count = self.allocation.len();
+        let resource_count = self.available.len();
+        if self.need.len() != thread_count {
+            return false;
+        }
+        let mut work = self.available.clone();
+        let mut finish = vec![false; thread_count];
+        let mut finished_count = 0usize;
+
+        loop {
+            let mut progressed = false;
+            for thread_id in 0..thread_count {
+                if finish[thread_id] {
+                    continue;
+                }
+                let need_row = &self.need[thread_id];
+                let alloc_row = &self.allocation[thread_id];
+                if need_row.len() != resource_count || alloc_row.len() != resource_count {
+                    return false;
+                }
+                let mut can_finish = true;
+                for resource_id in 0..resource_count {
+                    if need_row[resource_id] > work[resource_id] {
+                        can_finish = false;
+                        break;
+                    }
+                }
+                if can_finish {
+                    for resource_id in 0..resource_count {
+                        work[resource_id] += alloc_row[resource_id];
+                    }
+                    finish[thread_id] = true;
+                    finished_count += 1;
+                    progressed = true;
+                }
+            }
+            if finished_count == thread_count {
+                return true;
+            }
+            if !progressed {
+                return false;
+            }
+        }
     }
 }
